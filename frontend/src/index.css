@@ -1,0 +1,78 @@
+/* ── Design tokens ───────────────────────────────────────────────── */
+:root {
+  --parchment:    #F5F0E8;
+  --parchment-dk: #EAE2D0;
+  --ink:          #1C1610;
+  --ink-mid:      #3D3323;
+  --ink-soft:     #6B5E47;
+  --gold:         #B8860B;
+  --gold-lt:      #D4A017;
+  --gold-pale:    #F0D98A;
+  --sapphire:     #1A3A5C;
+  --sapphire-lt:  #2C5F8A;
+  --sapphire-dim: #E8EFF6;
+  --red-accent:   #8B1A1A;
+
+  --font-display: 'Frank Ruhl Libre', 'David Libre', serif;
+  --font-body:    'Heebo', 'Arial Hebrew', sans-serif;
+
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 16px;
+
+  --shadow-card: 0 2px 12px rgba(28,22,16,.10), 0 1px 3px rgba(28,22,16,.06);
+  --shadow-hover: 0 6px 24px rgba(28,22,16,.16), 0 2px 6px rgba(28,22,16,.10);
+}
+
+/* ── Reset ───────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font-body);
+  background: var(--parchment);
+  color: var(--ink);
+  direction: rtl;
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+h1,h2,h3,h4 { font-family: var(--font-display); font-weight: 700; line-height: 1.25; }
+
+button { cursor: pointer; font-family: var(--font-body); }
+a { color: inherit; text-decoration: none; }
+
+/* ── Scrollbar ───────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--parchment-dk); }
+::-webkit-scrollbar-thumb { background: var(--gold); border-radius: 3px; }
+
+/* ── Layout helpers ──────────────────────────────────────────────── */
+.container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* ── Ornamental divider (the signature element) ──────────────────── */
+.ornament {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--gold); font-size: .8rem; letter-spacing: .1em;
+}
+/* ── Spinner ─────────────────────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.ornament::before, .ornament::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to left, var(--gold-pale), var(--gold), var(--gold-pale));
+}
+
+/* ── Hover states ────────────────────────────────────────────────── */
+article:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(28,22,16,.14) !important; }
+article:hover .play-overlay,
+article:hover [style*="playOverlay"] { opacity: 1 !important; }
+
+/* ── Mobile ──────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  [style*="nav"][style*="display: flex"] { display: none !important; }
+  [style*="hamburger"] { display: flex !important; }
+}
