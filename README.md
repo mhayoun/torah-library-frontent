@@ -9,7 +9,7 @@ A full-stack Torah lecture library: a Python backend that fetches YouTube playli
 ```
 torah-library/
 ├── backend/
-│   ├── fetch_videos.py      # Python script to fetch YouTube data
+│   ├── main.py      # Python script to fetch YouTube data
 │   └── .env                 # (you create this) YOUTUBE_API_KEY=...
 │
 └── frontend/
