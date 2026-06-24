@@ -73,6 +73,6 @@ article:hover [style*="playOverlay"] { opacity: 1 !important; }
 
 /* ── Mobile ──────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
-  [style*="nav"][style*="display: flex"] { display: none !important; }
-  [style*="hamburger"] { display: flex !important; }
+  .header-nav { display: none !important; }
+  .header-hamburger { display: flex !important; }
 }

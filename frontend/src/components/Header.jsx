@@ -34,7 +34,7 @@ export default function Header({ activeTab, onTabChange }) {
         </div>
 
         {/* Desktop nav */}
-        <nav style={styles.nav}>
+        <nav style={styles.nav} className="header-nav">
           {NAV_ITEMS.map(item => {
             const Icon = item.icon
             const isActive = activeTab === item.key
@@ -52,7 +52,7 @@ export default function Header({ activeTab, onTabChange }) {
         </nav>
 
         {/* Mobile hamburger */}
-        <button style={styles.hamburger} onClick={() => setMobileOpen(o => !o)}>
+        <button style={styles.hamburger} className="header-hamburger" onClick={() => setMobileOpen(o => !o)}>
           {mobileOpen ? <X size={22} color="#F5F0E8" /> : <Menu size={22} color="#F5F0E8" />}
         </button>
       </div>
