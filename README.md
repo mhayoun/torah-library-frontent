@@ -69,7 +69,7 @@ This writes `frontend/public/categorized_videos.json`.
 
 ### Automating updates
 
-Schedule `fetch_videos.py` with a cron job or GitHub Actions to keep the data fresh:
+Schedule `main.py` with a cron job or GitHub Actions to keep the data fresh:
 
 ```yaml
 # .github/workflows/update-videos.yml
@@ -87,7 +87,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install google-api-python-client python-dotenv
-      - run: python backend/fetch_videos.py
+      - run: python backend/main.py
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
       - uses: stefanzweifel/git-auto-commit-action@v5
@@ -133,4 +133,4 @@ Vercel automatically serves `frontend/public/categorized_videos.json` as a stati
 
 ## Updating data
 
-After running `fetch_videos.py`, commit and push `categorized_videos.json`. Vercel will redeploy automatically if you have GitHub integration enabled.
+After running `main.py`, commit and push `categorized_videos.json`. Vercel will redeploy automatically if you have GitHub integration enabled.
