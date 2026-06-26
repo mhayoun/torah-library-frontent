@@ -114,19 +114,38 @@ def fetch_videos_for_playlist(
     logger=None,
 ):
     """
-    Fetches NEW videos only (stops pagination when a known ID is seen).
+    Fetches NEW videos only from a playlist where new videos are appended
+    at the END (oldest-first order on YouTube).
+
+    Strategy:
+      1. Paginate through ALL pages to reach the last page.
+      2. On the last page, scan items in REVERSE order (end → beginning).
+      3. Collect items whose ID is not in existing_ids.
+      4. Stop scanning the moment a known ID is hit — everything before it
+         (earlier in the playlist) is already stored.
+      5. Batch-fetch details only for the collected new IDs.
+
+    This is the inverse of the previous strategy which assumed newest-first
+    ordering. Because the playlist is oldest-first, new videos appear at
+    the end, so we must reach the last page before we can detect them.
+
     Returns (videos, mismatched_videos).
     """
-    playlist_id  = extract_playlist_id(playlist_url)
-    videos       = []
-    mismatched   = []
-    next_page    = None
-    keep_going   = True
+    playlist_id = extract_playlist_id(playlist_url)
+    videos      = []
+    mismatched  = []
 
     try:
         youtube = build("youtube", "v3", developerKey=API_KEY)
 
-        while keep_going:
+        # ── Phase 1: paginate to collect ALL pages of raw items ───────────────
+        # We must reach the last page to find new videos, so we can't short-
+        # circuit pagination early. We only store (videoId, item) tuples to
+        # keep memory minimal.
+        all_items  = []   # list of raw playlistItem dicts, in playlist order
+        next_page  = None
+
+        while True:
             try:
                 resp = youtube.playlistItems().list(
                     part="snippet,contentDetails",
@@ -148,96 +167,110 @@ def fetch_videos_for_playlist(
             if not items:
                 break
 
-            # Filter to genuinely new items; stop if we hit a known one
-            new_items = []
-            for item in items:
-                vid_id = item.get("contentDetails", {}).get("videoId")
-                if vid_id in existing_ids:
-                    if DEBUG:
-                        print(f"   [DEBUG] Known ID {vid_id} — stopping early.")
-                    keep_going = False
-                    break
-                new_items.append(item)
-
-            if new_items:
-                # Batch-fetch duration + view count for all new IDs at once
-                vid_ids = [
-                    it["contentDetails"]["videoId"]
-                    for it in new_items
-                    if it.get("contentDetails", {}).get("videoId")
-                ]
-                details_map = {}
-                if vid_ids:
-                    try:
-                        det = youtube.videos().list(
-                            part="contentDetails,statistics",
-                            id=",".join(vid_ids),
-                        ).execute()
-                        details_map = {v["id"]: v for v in det.get("items", [])}
-                    except Exception as det_exc:
-                        print(f"   ⚠️  Details batch failed: {det_exc}")
-                        if logger:
-                            logger.log_video_error(
-                                playlist_url=playlist_url,
-                                playlist_title=playlist_title or "",
-                                error=det_exc,
-                                extra="details batch; IDs: " + ", ".join(vid_ids),
-                            )
-
-                for item in new_items:
-                    snippet = item.get("snippet", {})
-                    vid_id  = item["contentDetails"].get("videoId")
-                    title   = snippet.get("title")
-
-                    try:
-                        det     = details_map.get(vid_id, {})
-                        thumbs  = snippet.get("thumbnails", {})
-                        video_obj = {
-                            "id":          vid_id,
-                            "title":       title,
-                            "url":         f"https://www.youtube.com/watch?v={vid_id}",
-                            "duration":    parse_duration(det.get("contentDetails", {}).get("duration", "")),
-                            "view_count":  int(det["statistics"]["viewCount"]) if det.get("statistics", {}).get("viewCount") else None,
-                            "upload_date": iso_date(snippet.get("publishedAt")),
-                            "thumbnail":   (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
-                            "category":    category or "אחר",
-                            "playlist":    playlist_title,
-                        }
-
-                        if logger:
-                            logger.record_found(playlist_url=playlist_url, playlist_title=playlist_title or "")
-
-                        target_cats = set()
-                        if category:
-                            target_cats = check_video_category_mismatch(
-                                title, category, playlist_title, playlist_url, logger=logger
-                            )
-
-                        if target_cats:
-                            mismatched.append((video_obj, target_cats))
-                        else:
-                            videos.append(video_obj)
-
-                        if logger:
-                            logger.record_success(playlist_url=playlist_url, playlist_title=playlist_title or "")
-
-                    except Exception as exc:
-                        print(f"   ❌ Error processing '{title}' ({vid_id}): {exc}")
-                        if logger:
-                            logger.log_video_error(
-                                playlist_url=playlist_url,
-                                playlist_title=playlist_title or "",
-                                video_id=vid_id or "",
-                                video_title=title or "",
-                                error=exc,
-                            )
-
-            if not keep_going:
-                break
+            all_items.extend(items)
 
             next_page = resp.get("nextPageToken")
             if not next_page:
-                break
+                break   # reached the last page
+
+        if DEBUG:
+            print(f"   [DEBUG] Fetched {len(all_items)} total items from playlist.")
+
+        if not all_items:
+            return videos, mismatched
+
+        # ── Phase 2: scan in REVERSE — newest additions are at the end ────────
+        # Walk backwards through all_items; collect unknowns; stop at first
+        # known ID (everything before it in the playlist is already stored).
+        new_items = []
+        for item in reversed(all_items):
+            vid_id = item.get("contentDetails", {}).get("videoId")
+            if not vid_id:
+                continue
+            if vid_id in existing_ids:
+                if DEBUG:
+                    print(f"   [DEBUG] Known ID {vid_id} — stopping reverse scan.")
+                break   # hit the boundary between known and new
+            new_items.append(item)
+
+        if DEBUG:
+            print(f"   [DEBUG] {len(new_items)} new item(s) found after reverse scan.")
+
+        if not new_items:
+            return videos, mismatched
+
+        # ── Phase 3: batch-fetch details for new IDs only ─────────────────────
+        vid_ids = [
+            it["contentDetails"]["videoId"]
+            for it in new_items
+            if it.get("contentDetails", {}).get("videoId")
+        ]
+        details_map = {}
+        if vid_ids:
+            try:
+                det = youtube.videos().list(
+                    part="contentDetails,statistics",
+                    id=",".join(vid_ids),
+                ).execute()
+                details_map = {v["id"]: v for v in det.get("items", [])}
+            except Exception as det_exc:
+                print(f"   ⚠️  Details batch failed: {det_exc}")
+                if logger:
+                    logger.log_video_error(
+                        playlist_url=playlist_url,
+                        playlist_title=playlist_title or "",
+                        error=det_exc,
+                        extra="details batch; IDs: " + ", ".join(vid_ids),
+                    )
+
+        # ── Phase 4: build video objects ──────────────────────────────────────
+        for item in new_items:
+            snippet = item.get("snippet", {})
+            vid_id  = item["contentDetails"].get("videoId")
+            title   = snippet.get("title")
+
+            try:
+                det    = details_map.get(vid_id, {})
+                thumbs = snippet.get("thumbnails", {})
+                video_obj = {
+                    "id":          vid_id,
+                    "title":       title,
+                    "url":         f"https://www.youtube.com/watch?v={vid_id}",
+                    "duration":    parse_duration(det.get("contentDetails", {}).get("duration", "")),
+                    "view_count":  int(det["statistics"]["viewCount"]) if det.get("statistics", {}).get("viewCount") else None,
+                    "upload_date": iso_date(snippet.get("publishedAt")),
+                    "thumbnail":   (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
+                    "category":    category or "אחר",
+                    "playlist":    playlist_title,
+                }
+
+                if logger:
+                    logger.record_found(playlist_url=playlist_url, playlist_title=playlist_title or "")
+
+                target_cats = set()
+                if category:
+                    target_cats = check_video_category_mismatch(
+                        title, category, playlist_title, playlist_url, logger=logger
+                    )
+
+                if target_cats:
+                    mismatched.append((video_obj, target_cats))
+                else:
+                    videos.append(video_obj)
+
+                if logger:
+                    logger.record_success(playlist_url=playlist_url, playlist_title=playlist_title or "")
+
+            except Exception as exc:
+                print(f"   ❌ Error processing '{title}' ({vid_id}): {exc}")
+                if logger:
+                    logger.log_video_error(
+                        playlist_url=playlist_url,
+                        playlist_title=playlist_title or "",
+                        video_id=vid_id or "",
+                        video_title=title or "",
+                        error=exc,
+                    )
 
     except Exception as exc:
         print(f"❌ Failed to fetch playlist {playlist_url}: {exc}")
