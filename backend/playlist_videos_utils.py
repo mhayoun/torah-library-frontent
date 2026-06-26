@@ -139,11 +139,9 @@ def fetch_videos_for_playlist(
         youtube = build("youtube", "v3", developerKey=API_KEY)
 
         # ── Phase 1: paginate to collect ALL pages of raw items ───────────────
-        # We must reach the last page to find new videos, so we can't short-
-        # circuit pagination early. We only store (videoId, item) tuples to
-        # keep memory minimal.
-        all_items  = []   # list of raw playlistItem dicts, in playlist order
+        all_items  = []
         next_page  = None
+        page_count = 0
 
         while True:
             try:
@@ -153,17 +151,47 @@ def fetch_videos_for_playlist(
                     maxResults=50,
                     pageToken=next_page,
                 ).execute()
+                page_count += 1
             except Exception as exc:
+                msg = (
+                    f"Phase-1 page {page_count+1} fetch failed. "
+                    f"playlistId={playlist_id}. "
+                    f"Likely quota exhausted (403) or invalid key (400). "
+                    f"Error: {type(exc).__name__}: {exc}"
+                )
+                print(f"❌ {msg}")
                 if logger:
                     logger.log_playlist_fetch_error(
                         playlist_url=playlist_url,
                         playlist_title=playlist_title or "",
                         error=exc,
                     )
-                print(f"❌ Failed page fetch for {playlist_url}: {exc}")
+                    logger.log_video_error(
+                        playlist_url=playlist_url,
+                        playlist_title=playlist_title or "",
+                        extra=msg,
+                    )
                 break
 
             items = resp.get("items", [])
+
+            if page_count == 1 and not items:
+                total_results = resp.get("pageInfo", {}).get("totalResults", "?")
+                msg = (
+                    f"Page 1 returned 0 items for playlist '{playlist_title}' "
+                    f"(id={playlist_id}). "
+                    f"YouTube pageInfo.totalResults={total_results}. "
+                    f"Causes: quota exhausted, wrong ID, or private playlist."
+                )
+                print(f"⚠️  {msg}")
+                if logger:
+                    logger.log_video_error(
+                        playlist_url=playlist_url,
+                        playlist_title=playlist_title or "",
+                        extra=msg,
+                    )
+                break
+
             if not items:
                 break
 
@@ -174,7 +202,14 @@ def fetch_videos_for_playlist(
                 break   # reached the last page
 
         if DEBUG:
-            print(f"   [DEBUG] Fetched {len(all_items)} total items from playlist.")
+            print(f"   [DEBUG] Paginated {page_count} page(s), {len(all_items)} total items.")
+
+        if logger:
+            logger.record_found(
+                playlist_url=playlist_url,
+                playlist_title=playlist_title or "",
+                count=len(all_items),
+            )
 
         if not all_items:
             return videos, mismatched
