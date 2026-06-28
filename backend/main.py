@@ -192,11 +192,12 @@ async def force_sync():
     r = await get_redis()
     try:
         await r.delete("cours_response")
-        last_sync = await r.get("last_sync_date")
+        result = await _build_response(r)
         return {
-            "status": "cache invalidated",
-            "last_sync": last_sync,
-            "message": "Next GET /api/cours will trigger a fresh sync",
+            "status": "sync complete",
+            "total":     result.get("total"),
+            "new":       result.get("new"),
+            "last_sync": result.get("last_sync"),
         }
     finally:
         await r.aclose()
@@ -236,3 +237,147 @@ async def get_log():
         return PlainTextResponse(content)
     finally:
         await r.aclose()
+
+
+@app.get("/api/debug-sync")
+async def debug_sync():
+    """
+    Runs a full incremental sync and returns a detailed plain-text report.
+    DRY RUN — reads from YouTube but does NOT write to Redis.
+
+    Hit this URL in your browser to diagnose why new videos are missing:
+      https://your-backend.vercel.app/api/debug-sync
+    """
+    from fastapi.responses import PlainTextResponse
+    from playlist_videos_utils import fetch_videos_for_playlist
+
+    lines = []
+    log = lines.append
+
+    def sep(c="─", w=68): log(c * w)
+
+    log("=" * 68)
+    log(f"  DEBUG SYNC  {datetime.now(timezone.utc).isoformat()}")
+    log("=" * 68)
+    log("")
+
+    try:
+        r = await get_redis()
+        try:
+            # ── STEP 0: Redis state ───────────────────────────────────────
+            sep()
+            log("STEP 0 — Redis state")
+            sep()
+            existing_raw = await r.get("cours_full")
+            cached       = await r.get("cours_response")
+            last_sync    = await r.get("last_sync_date")
+            ttl          = await r.ttl("cours_response")
+
+            existing: list[dict]    = json.loads(existing_raw) if existing_raw else []
+            existing_ids: set[str]  = {v["id"] for v in existing if v.get("id")}
+
+            log(f"  cours_full      : {len(existing)} videos stored")
+            log(f"  existing_ids    : {len(existing_ids)} known IDs")
+            log(f"  cours_response  : {'EXISTS (TTL ' + str(ttl) + 's)' if cached else 'MISSING'}")
+            log(f"  last_sync_date  : {last_sync or 'never'}")
+            if existing:
+                newest = sorted(existing, key=lambda v: v.get("upload_date") or "", reverse=True)
+                log(f"  newest stored   : [{newest[0].get('upload_date','?')[:10]}] {newest[0].get('title','?')}")
+                log(f"  oldest stored   : [{newest[-1].get('upload_date','?')[:10]}] {newest[-1].get('title','?')}")
+            log("")
+
+            # ── STEP 1: Playlist discovery ────────────────────────────────
+            sep()
+            log("STEP 1 — Playlist discovery (yt-dlp)")
+            sep()
+            try:
+                raw_playlists = get_raw_playlists(TARGET_URLS)
+                structured    = categorize_playlists(raw_playlists)
+            except Exception as e:
+                log(f"  FAILED: {e}")
+                return PlainTextResponse("\n".join(lines))
+
+            total_pl = sum(len(v) for v in structured.values())
+            log(f"  Found {total_pl} playlists across {len(structured)} categories")
+            for cat, pls in structured.items():
+                for pl in pls:
+                    log(f"    [{cat}] {pl.get('title')} — {pl.get('url','')[:60]}")
+            log("")
+
+            # ── STEP 2: Per-playlist fetch ────────────────────────────────
+            sep()
+            log("STEP 2 — Per-playlist YouTube API fetch")
+            sep()
+
+            all_new_flat: list[dict] = []
+
+            for category, playlists in structured.items():
+                if category == "אחר":
+                    continue
+                for pl in playlists:
+                    pl_url   = pl.get("url", "")
+                    pl_title = pl.get("title", "")
+                    log(f"\n  [{category}] {pl_title}")
+                    try:
+                        new_vids, mismatched = fetch_videos_for_playlist(
+                            pl_url, existing_ids,
+                            category=category,
+                            playlist_title=pl_title,
+                            logger=None,
+                        )
+                    except Exception as e:
+                        log(f"     FAILED: {e}")
+                        continue
+
+                    log(f"     new videos found  : {len(new_vids)}")
+                    log(f"     mismatched videos : {len(mismatched)}")
+                    for v in new_vids[:5]:
+                        log(f"       + [{v.get('upload_date','?')[:10]}] {v.get('title','?')}")
+                    if len(new_vids) > 5:
+                        log(f"       … and {len(new_vids) - 5} more")
+                    if not new_vids and not mismatched:
+                        log(f"     WARNING: 0 new videos")
+                        log(f"       Possible: all videos already in cours_full, or quota exhausted")
+
+                    all_new_flat.extend(new_vids)
+                    all_new_flat.extend(v for v, _ in mismatched)
+
+            log("")
+
+            # ── STEP 3: Merge ─────────────────────────────────────────────
+            sep()
+            log("STEP 3 — Merge (dry run)")
+            sep()
+            fresh_ids = {v["id"] for v in all_new_flat if v.get("id")}
+            new_count = len(fresh_ids - existing_ids)
+            all_videos = all_new_flat + [v for v in existing if v.get("id") not in fresh_ids]
+            log(f"  new from this sync  : {len(all_new_flat)}")
+            log(f"  genuinely new IDs   : {new_count}")
+            log(f"  total after merge   : {len(all_videos)}")
+            log(f"  would write new=    : {new_count}")
+            log("")
+
+            # ── SUMMARY ───────────────────────────────────────────────────
+            sep("=")
+            log("SUMMARY")
+            sep("=")
+            if new_count > 0:
+                log(f"  OK — {new_count} new video(s) detected.")
+                log(f"  If live site isn't showing them -> likely Vercel timeout.")
+                log(f"  Fix: maxDuration=300 in vercel.json (already applied).")
+            elif len(existing_ids) == 0 and len(all_new_flat) == 0:
+                log(f"  FAIL — cours_full empty AND 0 from YouTube.")
+                log(f"  Check YOUTUBE_API_KEY and quota.")
+            elif new_count == 0 and len(all_new_flat) > 0:
+                log(f"  WARN — API returned videos but all already in cours_full.")
+            else:
+                log(f"  INFO — 0 new videos. No new uploads since last sync.")
+            log("")
+
+        finally:
+            await r.aclose()
+
+    except Exception as e:
+        log(f"\nFATAL: {type(e).__name__}: {e}")
+
+    return PlainTextResponse("\n".join(lines))
