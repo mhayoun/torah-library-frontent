@@ -1,7 +1,7 @@
 """
 main.py
 -------
-FastAPI backend for the Rav's Torah lessons site.
+FastAPI backend for the Rav Aaron Butbul's Torah lessons site.
 
 Endpoints:
   GET /api/cours   — returns the full catalogue (Redis-cached, 6h TTL)
