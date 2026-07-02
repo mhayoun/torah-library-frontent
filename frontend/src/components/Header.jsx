@@ -28,7 +28,7 @@ export default function Header({ activeTab, onTabChange }) {
             <BookOpen size={22} color="#F5F0E8" strokeWidth={1.5} />
           </div>
           <div>
-            <div style={styles.logoTitle}>מאגר שיעורי תורה</div>
+            <div style={styles.logoTitle}>הרב אהרון בוטבול שליט"א</div>
             <div style={styles.logoSub}>ספריית שיעורים</div>
           </div>
         </div>

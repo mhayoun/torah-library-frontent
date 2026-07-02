@@ -1,20 +1,49 @@
-import React, { useState, useMemo, useCallback } from 'react'
+import React, { useState, useMemo, useCallback, useEffect } from 'react'
 import { Search, Filter, SlidersHorizontal } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
+import { dlog } from '../utils/debug.js'
 
 const ALL_LABEL = 'כל הקטגוריות'
 const ALL_YEARS = 'כל השנים'
 
-export default function SearchPage({ allVideos, categories, years }) {
-  const [query, setQuery]       = useState('')
-  const [category, setCategory] = useState(ALL_LABEL)
-  const [year, setYear]         = useState(ALL_YEARS)
+export default function SearchPage({ allVideos, categories, years, initialParams }) {
+  const [query, setQuery]       = useState(initialParams?.query || '')
+  const [category, setCategory] = useState(initialParams?.category || ALL_LABEL)
+  const [year, setYear]         = useState(initialParams?.year || ALL_YEARS)
   const [searched, setSearched] = useState(false)
   const [loading, setLoading]   = useState(false)
 
+  // If the person arrived here via the HomePage quick-search bar, run the
+  // search immediately with the params they picked there.
+  // NOTE: no extra "already applied" ref-guard here on purpose — React 18
+  // StrictMode runs effects twice in dev (mount → cleanup → mount again),
+  // and a ref guard would mark itself "done" on the throwaway first run,
+  // then skip re-arming the timer on the real second run, leaving the
+  // spinner stuck forever. Relying only on the [initialParams] dependency
+  // array is Strict-Mode-safe: cleanup cancels the first timer, the second
+  // run schedules a fresh one, and it fires normally.
+  useEffect(() => {
+    if (!initialParams) return
+    dlog('SearchPage', 'initialParams effect firing', initialParams)
+    setQuery(initialParams.query || '')
+    setCategory(initialParams.category || ALL_LABEL)
+    setYear(initialParams.year || ALL_YEARS)
+    setLoading(true)
+    setSearched(false)
+    const t = setTimeout(() => {
+      dlog('SearchPage', 'initialParams search complete')
+      setSearched(true)
+      setLoading(false)
+    }, 400)
+    return () => {
+      dlog('SearchPage', 'initialParams effect cleanup (clearing timer)')
+      clearTimeout(t)
+    }
+  }, [initialParams])
+
   const results = useMemo(() => {
     if (!searched) return []
-    return allVideos.filter(v => {
+    const r = allVideos.filter(v => {
       const matchQuery = !query.trim() ||
         v.title.includes(query) ||
         v.playlist?.includes(query) ||
@@ -23,16 +52,19 @@ export default function SearchPage({ allVideos, categories, years }) {
       const matchYear = year === ALL_YEARS || v.hebraic_year === year
       return matchQuery && matchCat && matchYear
     })
+    dlog('SearchPage', 'results computed', { query, category, year, count: r.length })
+    return r
   }, [allVideos, query, category, year, searched])
 
   const handleSearch = useCallback(() => {
+    dlog('SearchPage', 'manual search button clicked', { query, category, year })
     setLoading(true)
     setSearched(false)
     setTimeout(() => {
       setSearched(true)
       setLoading(false)
     }, 400)
-  }, [])
+  }, [query, category, year])
 
   const handleKey = (e) => { if (e.key === 'Enter') handleSearch() }
 

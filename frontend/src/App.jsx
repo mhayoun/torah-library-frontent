@@ -4,6 +4,7 @@ import HomePage     from './pages/HomePage.jsx'
 import CategoryPage from './pages/CategoryPage.jsx'
 import SearchPage   from './pages/SearchPage.jsx'
 import { useVideos } from './hooks/useVideos.js'
+import { dlog } from './utils/debug.js'
 
 export default function App() {
   const {
@@ -11,7 +12,16 @@ export default function App() {
     loading, error, lastSync, total, newCount,
   } = useVideos()
 
-  const [activeTab, setActiveTab] = useState('כל הקטגוריות')
+  const [activeTab, setActiveTab]   = useState('כל הקטגוריות')
+  const [searchInit, setSearchInit] = useState(null)
+
+  // Called from the HomePage quick-search bar — hands the chosen params off
+  // to SearchPage and switches tabs.
+  const handleHomeSearch = (params) => {
+    dlog('App', 'handing off search from HomePage', params)
+    setSearchInit(params)
+    setActiveTab('__search__')
+  }
 
   const renderContent = () => {
     if (loading) return (
@@ -31,13 +41,24 @@ export default function App() {
     if (!catalog) return null
 
     if (activeTab === '__search__')
-      return <SearchPage allVideos={allVideos} categories={categories} years={years} />
+      return (
+        <SearchPage
+          allVideos={allVideos}
+          categories={categories}
+          years={years}
+          initialParams={searchInit}
+        />
+      )
 
     if (activeTab === 'כל הקטגוריות')
       return (
         <HomePage
           catalog={catalog}
+          allVideos={allVideos}
+          categories={categories}
+          years={years}
           onCategorySelect={setActiveTab}
+          onSearch={handleHomeSearch}
           lastSync={lastSync}
           total={total}
           newCount={newCount}
@@ -59,7 +80,7 @@ export default function App() {
       </main>
       <footer style={s.footer}>
         <div style={s.footerInner}>
-          <span>מאגר שיעורי תורה</span>
+          <span>הרב אהרון בוטבול שליט"א</span>
           <span style={s.dot}>•</span>
           <span>כל הזכויות שמורות</span>
         </div>
