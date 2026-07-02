@@ -10,6 +10,7 @@ export default function App() {
   const {
     catalog, allVideos, categories, years,
     loading, error, lastSync, total, newCount,
+    fetchMs, fetchSource,
   } = useVideos()
 
   const [activeTab, setActiveTab]   = useState('כל הקטגוריות')
@@ -62,6 +63,8 @@ export default function App() {
           lastSync={lastSync}
           total={total}
           newCount={newCount}
+          fetchMs={fetchMs}
+          fetchSource={fetchSource}
         />
       )
 

@@ -196,6 +196,8 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
 
     total_new = 0
     step3_t0 = time.perf_counter()
+    fetch_cache = {}  # {playlist_url: (new_vids, mismatched)} — reused in STEP 4
+                       # so we don't hit the YouTube API twice for the same playlists
 
     for category, playlists in structured.items():
         if category == "אחר":
@@ -233,6 +235,8 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
             finally:
                 info(f"⏱  fetch took {fmt_elapsed(time.perf_counter() - pl_t0)}")
 
+            fetch_cache[pl_url] = (new_vids, mismatched)
+
             # ── Diagnosis ────────────────────────────────────────────────────
 
             if not new_vids and not mismatched:
@@ -268,21 +272,25 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
 
     info(f"⏱  STEP 3 total elapsed: {fmt_elapsed(time.perf_counter() - step3_t0)}")
 
-    return total_new
+    return total_new, fetch_cache
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 4 — Merge logic simulation
 # ══════════════════════════════════════════════════════════════════════════════
 
-def check_merge(existing, existing_ids, structured, verbose=False):
+def check_merge(existing, existing_ids, structured, fetch_cache=None, verbose=False):
     hdr("STEP 4 — Merge logic (mirrors _build_response exactly)")
+
+    if fetch_cache:
+        ok(f"Reusing {len(fetch_cache)} playlist result(s) fetched in STEP 3 — skipping duplicate API calls")
 
     fresh_catalogue = enrich_structured_playlists(
         structured,
         skip_fallback=True,
         logger=None,
         existing_ids=existing_ids,
+        prefetched=fetch_cache,
     )
 
     fresh_flat: list[dict] = [
@@ -437,9 +445,9 @@ async def main():
             err("Aborting — playlist discovery failed")
             return
 
-        total_new_from_probe = check_per_playlist_fetch(structured, existing_ids, verbose=args.verbose)
+        total_new_from_probe, fetch_cache = check_per_playlist_fetch(structured, existing_ids, verbose=args.verbose)
 
-        all_videos, new_count = check_merge(existing, existing_ids, structured, verbose=args.verbose)
+        all_videos, new_count = check_merge(existing, existing_ids, structured, fetch_cache=fetch_cache, verbose=args.verbose)
 
         await check_redis_write(r, all_videos, new_count, dry_run=not args.write)
 

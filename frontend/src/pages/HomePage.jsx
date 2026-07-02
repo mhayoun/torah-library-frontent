@@ -25,12 +25,24 @@ function formatSync(iso) {
   } catch { return null }
 }
 
+// Human-readable load time, e.g. "0.4 שנ'" or "3.2 שנ'".
+// Cache hits are near-instant (just a sessionStorage read), so they're
+// labelled separately rather than shown as "0.0 שנ'".
+function formatDuration(ms, source) {
+  if (ms == null) return null
+  if (source === 'cache') return 'מיידי (מהזיכרון)'
+  const seconds = ms / 1000
+  return `${seconds.toFixed(1)} שנ'`
+}
+
 export default function HomePage({
   catalog, allVideos = [], categories = [], years = [],
   onCategorySelect, onSearch, lastSync, total, newCount,
+  fetchMs, fetchSource,
 }) {
-  const entries   = Object.entries(catalog)
-  const syncLabel = formatSync(lastSync)
+  const entries       = Object.entries(catalog)
+  const syncLabel      = formatSync(lastSync)
+  const durationLabel  = formatDuration(fetchMs, fetchSource)
   const [loadingCat, setLoadingCat] = useState(null)
 
   // ── Quick search bar state ────────────────────────────────────────────
@@ -191,6 +203,9 @@ export default function HomePage({
             <div style={s.syncBadge}>
               <RefreshCw size={11} style={{ marginLeft: 5, flexShrink: 0 }} />
               עודכן לאחרונה: {syncLabel}
+              {durationLabel && (
+                <span style={s.syncDuration}> · זמן טעינה: {durationLabel}</span>
+              )}
             </div>
           )}
         </div>
@@ -357,5 +372,9 @@ const s = {
     background: 'rgba(184,134,11,.08)',
     border: '1px solid rgba(184,134,11,.2)',
     borderRadius: 20, padding: '4px 12px',
+  },
+  syncDuration: {
+    color: '#B8860B',
+    fontWeight: 600,
   },
 }

@@ -28,8 +28,12 @@ export function useVideos() {
   const [lastSync, setLastSync] = useState(null)
   const [total,    setTotal]    = useState(0)
   const [newCount, setNewCount] = useState(0)
+  const [fetchMs,     setFetchMs]     = useState(null) // elapsed time of the load, in ms
+  const [fetchSource, setFetchSource] = useState(null) // 'cache' | 'network'
 
   useEffect(() => {
+    const t0 = performance.now()
+
     // 1. Try session cache first — instant response
     const cached = getCached()
     if (cached) {
@@ -37,11 +41,16 @@ export function useVideos() {
       setLastSync(cached.last_sync)
       setTotal(cached.total  ?? 0)
       setNewCount(cached.new ?? 0)
+      setFetchMs(performance.now() - t0)
+      setFetchSource('cache')
       setLoading(false)
       return
     }
 
-    // 2. Otherwise hit the API backend
+    // 2. Otherwise hit the API backend — this is the call that can be slow:
+    //    if the server-side Redis cache (cours_response, 6h TTL) has also
+    //    expired, the backend runs a full incremental sync against the
+    //    YouTube API before responding, which can take many seconds.
     fetch(API_URL)
       .then(r => {
         if (!r.ok) throw new Error(`Erreur serveur : ${r.status}`)
@@ -54,9 +63,13 @@ export function useVideos() {
         setTotal(data.total  ?? 0)
         setNewCount(data.new ?? 0)
         setCache(data)
+        setFetchMs(performance.now() - t0)
+        setFetchSource('network')
         setLoading(false)
       })
       .catch(e => {
+        setFetchMs(performance.now() - t0)
+        setFetchSource('network')
         setError(e.message)
         setLoading(false)
       })
@@ -94,5 +107,5 @@ export function useVideos() {
 
   const categories = catalog ? Object.keys(catalog) : []
 
-  return { catalog, allVideos, categories, years, loading, error, lastSync, total, newCount }
+  return { catalog, allVideos, categories, years, loading, error, lastSync, total, newCount, fetchMs, fetchSource }
 }

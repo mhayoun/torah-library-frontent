@@ -653,6 +653,10 @@ def enrich_structured_playlists(
     skip_fallback=True,
     logger=None,
     existing_ids=None,          # NEW: passed from Redis in API mode
+    prefetched=None,            # NEW: optional {playlist_url: (new_vids, mismatched)}
+                                 # cache to avoid re-hitting the YouTube API for
+                                 # playlists that were already fetched elsewhere
+                                 # in the same run (e.g. debug_sync.py STEP 3).
 ):
     """
     Fetches new videos for all playlists and returns a flat catalogue dict:
@@ -690,14 +694,17 @@ def enrich_structured_playlists(
             pl_title = playlist.get("title")
             print(f"   → {pl_title}")
 
-            new_vids, mismatched = fetch_videos_for_playlist(
-                pl_url,
-                existing_ids,
-                category=category,
-                playlist_title=pl_title,
-                logger=logger,
-                required_keyword=playlist.get("required_keyword"),
-            )
+            if prefetched is not None and pl_url in prefetched:
+                new_vids, mismatched = prefetched[pl_url]
+            else:
+                new_vids, mismatched = fetch_videos_for_playlist(
+                    pl_url,
+                    existing_ids,
+                    category=category,
+                    playlist_title=pl_title,
+                    logger=logger,
+                    required_keyword=playlist.get("required_keyword"),
+                )
 
             added = 0
             for v in new_vids:
