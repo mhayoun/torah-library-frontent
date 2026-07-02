@@ -20,10 +20,7 @@ export default function SearchPage({ allVideos, categories, years }) {
         v.playlist?.includes(query) ||
         v.category?.includes(query)
       const matchCat  = category === ALL_LABEL || v.category === category
-      const matchYear = year === ALL_YEARS || (
-        v.title.includes(year) ||
-        (v.upload_date && new Date(v.upload_date).getFullYear() === Number(year))
-      )
+      const matchYear = year === ALL_YEARS || v.hebraic_year === year
       return matchQuery && matchCat && matchYear
     })
   }, [allVideos, query, category, year, searched])

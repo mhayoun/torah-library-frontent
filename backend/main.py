@@ -26,6 +26,9 @@ import os
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
+load_dotenv()   # must run BEFORE importing playlist_videos_utils, which reads
+                # YOUTUBE_API_KEY from os.environ at import time.
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis as aioredis
@@ -35,13 +38,14 @@ from playlist_utils import get_raw_playlists, categorize_playlists
 from playlist_videos_utils import enrich_structured_playlists
 from debug_logger import DebugLogger
 
-load_dotenv()
-
 # ── Config ────────────────────────────────────────────────────────────────────
 
 TARGET_URLS = [
     "https://www.youtube.com/@Rabbi_Aharon_Butbul/playlists",
     "https://www.youtube.com/@%D7%94%D7%A8%D7%91%D7%90%D7%94%D7%A8%D7%95%D7%9F%D7%91%D7%95%D7%98%D7%91%D7%95%D7%9C-%D7%A97%D7%9E/playlists",
+    "https://www.youtube.com/@nissimtrabelsy3957/streams",
+    "https://www.youtube.com/@nissimtrabelsy3957/videos",
+    "https://www.youtube.com/@nissimtrabelsy3957/playlists"
 ]
 
 CACHE_TTL = 6 * 3600  # 6 hours — same as Redis TTL
@@ -85,6 +89,8 @@ async def _build_response(r) -> dict:
     logger = DebugLogger()
 
     # 2. Discover playlists from the channel pages
+    for url in TARGET_URLS:
+        print(f"[DEBUG] Processing TARGET_URL: {url}")
     raw_playlists = get_raw_playlists(TARGET_URLS)
     structured = categorize_playlists(raw_playlists)
 
@@ -116,6 +122,7 @@ async def _build_response(r) -> dict:
     #    from Redis that may have been stored with the wrong category before
     #    the rerouting fix was deployed).
     from playlist_utils import find_matching_categories
+    from playlist_videos_utils import extract_hebraic_year
     for v in all_videos:
         title = v.get("title", "")
         current_cat = v.get("category", "אחר")
@@ -124,6 +131,11 @@ async def _build_response(r) -> dict:
             correct_cat = matches[0][0]
             if correct_cat != current_cat:
                 v["category"] = correct_cat
+
+        # Backfill hebraic_year for videos stored before this field existed,
+        # or re-derive it if it's missing/empty.
+        if not v.get("hebraic_year"):
+            v["hebraic_year"] = extract_hebraic_year(title) or extract_hebraic_year(v.get("playlist", ""))
 
     # Rebuild catalogue from the full merged flat list
     catalogue: dict[str, list] = {}
@@ -249,7 +261,7 @@ async def debug_sync():
       https://your-backend.vercel.app/api/debug-sync
     """
     from fastapi.responses import PlainTextResponse
-    from playlist_videos_utils import fetch_videos_for_playlist
+    from playlist_videos_utils import fetch_videos_for_playlist, fetch_videos_by_ids
 
     lines = []
     log = lines.append
@@ -291,6 +303,8 @@ async def debug_sync():
             log("STEP 1 — Playlist discovery (yt-dlp)")
             sep()
             try:
+                for url in TARGET_URLS:
+                    log(f"  Processing TARGET_URL: {url}")
                 raw_playlists = get_raw_playlists(TARGET_URLS)
                 structured    = categorize_playlists(raw_playlists)
             except Exception as e:
@@ -314,7 +328,11 @@ async def debug_sync():
             for category, playlists in structured.items():
                 if category == "אחר":
                     continue
-                for pl in playlists:
+
+                real_playlists = [p for p in playlists if p.get("kind") != "video"]
+                loose_videos   = [p for p in playlists if p.get("kind") == "video"]
+
+                for pl in real_playlists:
                     pl_url   = pl.get("url", "")
                     pl_title = pl.get("title", "")
                     log(f"\n  [{category}] {pl_title}")
@@ -323,6 +341,34 @@ async def debug_sync():
                             pl_url, existing_ids,
                             category=category,
                             playlist_title=pl_title,
+                            logger=None,
+                            required_keyword=pl.get("required_keyword"),
+                        )
+                    except Exception as e:
+                        log(f"     FAILED: {e}")
+                        continue
+
+                    log(f"     new videos found  : {len(new_vids)}")
+                    log(f"     mismatched videos : {len(mismatched)}")
+                    for v in new_vids[:5]:
+                        log(f"       + [{v.get('upload_date','?')[:10]}] {v.get('title','?')}")
+                    if len(new_vids) > 5:
+                        log(f"       … and {len(new_vids) - 5} more")
+                    if not new_vids and not mismatched:
+                        log(f"     WARNING: 0 new videos")
+                        log(f"       Possible: all videos already in cours_full, or quota exhausted")
+
+                    all_new_flat.extend(new_vids)
+                    all_new_flat.extend(v for v, _ in mismatched)
+
+                if loose_videos:
+                    label = f"{category} (direct videos)"
+                    log(f"\n  [{category}] {label} — {len(loose_videos)} candidate video(s)")
+                    try:
+                        new_vids, mismatched = fetch_videos_by_ids(
+                            loose_videos, existing_ids,
+                            category=category,
+                            source_label=label,
                             logger=None,
                         )
                     except Exception as e:

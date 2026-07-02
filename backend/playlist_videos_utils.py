@@ -3,6 +3,7 @@ import json
 import re
 from datetime import datetime, timezone
 from googleapiclient.discovery import build
+from pyluach import dates as heb_dates
 
 from playlist_utils import CATEGORY_MAPPING, find_matching_categories
 from debug_logger import DebugLogger
@@ -14,6 +15,155 @@ DEBUG   = True
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "frontend", "public", "categorized_videos.json")
 
 _EPOCH = datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+
+# ── Hebraic year extraction ─────────────────────────────────────────────────
+#
+# Fully dynamic — no hardcoded list of years, so next year (and every year
+# after) works automatically without code changes.
+#
+# Hebrew year abbreviations look like: תש + [tens letter] + ["] + [units letter]
+#   e.g. תשפ"ו (5786) = תש(700) + פ(80) + gershayim + ו(6)
+#        תשע"ט (5779) = תש(700) + ע(70) + gershayim + ט(9)
+# or, when there's no units digit, just: תש + [tens letter]
+#   e.g. תש"פ / תשפ (5780) = תש(700) + פ(80)   [our canonical form drops
+#        the quote for this case: 'תשפ', per spec]
+#
+# FORMAT RULE:
+#   4-letter year (תש + tens + units)  -> תש + tens + '"' + units   e.g. תשפ"ו
+#   3-letter year (תש + tens only)     -> תש + tens                e.g. תשפ
+TENS_LETTERS_REGULAR = "יכלמנסעפצק"   # 10, 20, 30 ... 100
+TENS_LETTERS_FINAL   = "ךםןףץ"        # final-letter forms (word-end spelling)
+TENS_LETTERS         = TENS_LETTERS_REGULAR + TENS_LETTERS_FINAL
+UNITS_LETTERS        = "אבגדהוזחט"     # 1..9
+
+_FINAL_TO_REGULAR = {"ך": "כ", "ם": "מ", "ן": "נ", "ף": "פ", "ץ": "צ"}
+
+# All quote-like characters that can stand in for the gershayim (״)/geresh
+# (׳) used in Hebrew numeral notation.
+_HEB_YEAR_QUOTES = "\"'\u05f3\u05f4\u2018\u2019\u201c\u201d"
+
+# 4-letter form: תש + tens + (mandatory quote) + units — e.g. תשפ"ו, תשצ"א.
+# The quote is mandatory here since it's what distinguishes a year from an
+# ordinary 4-letter word.
+_HEB_YEAR_QUOTED_RE = re.compile(
+    r"(ה)?תש([" + TENS_LETTERS + r"])[" + _HEB_YEAR_QUOTES + r"]+([" + UNITS_LETTERS + r"])(?![א-ת])"
+)
+
+# 3-letter form: תש + tens only — e.g. תשפ, תש"פ, התשפ.
+# Requires either the definite-article "ה" prefix or a quote character to be
+# confident this is a year and not an ordinary word (e.g. תשע = "nine",
+# תשליך = "tashlich", תשלישי = "third").
+_HEB_YEAR_BARE_RE = re.compile(
+    r"(ה)?תש([" + _HEB_YEAR_QUOTES + r"])?([" + TENS_LETTERS + r"])(?![א-ת])"
+)
+
+
+def _normalize_letter(letter):
+    """Converts a final-form letter (e.g. ץ) to its regular form (e.g. צ)."""
+    return _FINAL_TO_REGULAR.get(letter, letter)
+
+
+def extract_hebraic_year(title):
+    """
+    Extracts the Hebrew (hebraic) year from a video/playlist title, e.g.:
+        'ג' תשרי התשפ"ו - יום כנגד שנה...'   -> 'תשפ"ו'
+        'הלכה יומית תשפ"ו'                    -> 'תשפ"ו'
+        'משהו משנת תש"פ'                       -> 'תשפ'
+
+    Fully dynamic (no hardcoded year list) — works for any past or future
+    Hebrew year without code changes. Returns None if no confident match is
+    found (never guesses/invents a year). When several valid matches exist,
+    prefers the one with the definite-article "ה" prefix (the common form
+    in these titles, e.g. "התשפ\"ו").
+    """
+    if not title:
+        return None
+
+    best = None  # (canonical, has_prefix)
+
+    # Prefer the unambiguous 4-letter/quoted form first.
+    for m in _HEB_YEAR_QUOTED_RE.finditer(title):
+        prefix, tens, units = m.group(1), m.group(2), m.group(3)
+        canonical = "תש" + _normalize_letter(tens) + '"' + units
+        has_prefix = bool(prefix)
+        if best is None or (has_prefix and not best[1]):
+            best = (canonical, has_prefix)
+    if best:
+        return best[0]
+
+    # Fall back to the 3-letter/bare form (needs ה prefix or a quote).
+    for m in _HEB_YEAR_BARE_RE.finditer(title):
+        prefix, quote, tens = m.group(1), m.group(2), m.group(3)
+        if not prefix and not quote:
+            continue  # too ambiguous - could be an ordinary word
+        canonical = "תש" + _normalize_letter(tens)
+        has_prefix = bool(prefix)
+        if best is None or (has_prefix and not best[1]):
+            best = (canonical, has_prefix)
+
+    return best[0] if best else None
+
+
+# ── Hebraic year fallback (computed from upload_date) ──────────────────────
+#
+# Used only when extract_hebraic_year() couldn't find a year in the title
+# or playlist title. Converts the video's Gregorian upload date to a Hebrew
+# year and formats it using the same canonical convention as above
+# (תש + tens + '"' + units, or תש + tens with no quote when units == 0).
+# Only years 5700-5799 (i.e. the תש... range) are supported, matching the
+# format the rest of the codebase expects; anything outside that range
+# returns None rather than guessing at an unsupported letter pattern.
+
+_HEB_YEAR_BASE = 5700  # first year in the תש... range
+
+
+def _heb_remainder_to_letters(remainder):
+    """Converts a 0-99 remainder (year - 5700) into תש + Hebrew letters."""
+    if remainder <= 0:
+        return "תש"
+
+    tens_digit  = (remainder // 10) * 10
+    units_digit = remainder % 10
+
+    # Avoid spelling out God's name: 15 -> ט"ו (not י"ה), 16 -> ט"ז (not י"ו)
+    if tens_digit == 10 and units_digit == 5:
+        return 'תש' + 'ט' + '"' + 'ו'
+    if tens_digit == 10 and units_digit == 6:
+        return 'תש' + 'ט' + '"' + 'ז'
+
+    tens_letter = TENS_LETTERS_REGULAR[tens_digit // 10 - 1] if tens_digit else ""
+
+    if units_digit == 0:
+        return "תש" + tens_letter
+
+    units_letter = UNITS_LETTERS[units_digit - 1]
+    return "תש" + tens_letter + '"' + units_letter
+
+
+def compute_hebraic_year_from_date(upload_date):
+    """
+    Computes the canonical Hebrew year string (e.g. 'תשפ"ו') from an ISO
+    Gregorian upload_date string. Returns None if upload_date is missing/
+    unparseable or the resulting Hebrew year falls outside the supported
+    5700-5799 (תש...) range.
+    """
+    if not upload_date:
+        return None
+    try:
+        dt = datetime.fromisoformat(upload_date.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    try:
+        heb_year = heb_dates.GregorianDate(dt.year, dt.month, dt.day).to_heb().year
+    except Exception:
+        return None
+
+    remainder = heb_year - _HEB_YEAR_BASE
+    if not (0 <= remainder <= 99):
+        return None  # outside the תש... range this codebase's format supports
+
+    return _heb_remainder_to_letters(remainder)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -112,6 +262,7 @@ def fetch_videos_for_playlist(
     category=None,
     playlist_title=None,
     logger=None,
+    required_keyword=None,
 ):
     """
     Fetches NEW videos only from a playlist where new videos are appended
@@ -128,6 +279,13 @@ def fetch_videos_for_playlist(
     This is the inverse of the previous strategy which assumed newest-first
     ordering. Because the playlist is oldest-first, new videos appear at
     the end, so we must reach the last page before we can detect them.
+
+    `required_keyword`, if given, is a per-VIDEO title check applied on top
+    of playlist-level filtering (see CHANNEL_CATEGORY_OVERRIDES in
+    playlist_utils.py): a playlist can pass the override because its own
+    title has the keyword, but still contain unrelated videos saved into
+    it whose titles don't. Any such video is skipped entirely - not added
+    to `videos`, not to `mismatched`, not to any category.
 
     Returns (videos, mismatched_videos).
     """
@@ -241,21 +399,27 @@ def fetch_videos_for_playlist(
             if it.get("contentDetails", {}).get("videoId")
         ]
         details_map = {}
-        if vid_ids:
+        # videos.list's `id` filter only accepts up to 50 IDs per request;
+        # sending more (e.g. all 233 new IDs at once) makes YouTube reject
+        # the whole request with a 400 invalidFilters error. Chunk into
+        # batches of 50 so one large playlist can't fail entirely.
+        DETAILS_BATCH_SIZE = 50
+        for i in range(0, len(vid_ids), DETAILS_BATCH_SIZE):
+            chunk = vid_ids[i:i + DETAILS_BATCH_SIZE]
             try:
                 det = youtube.videos().list(
                     part="contentDetails,statistics",
-                    id=",".join(vid_ids),
+                    id=",".join(chunk),
                 ).execute()
-                details_map = {v["id"]: v for v in det.get("items", [])}
+                details_map.update({v["id"]: v for v in det.get("items", [])})
             except Exception as det_exc:
-                print(f"   ⚠️  Details batch failed: {det_exc}")
+                print(f"   ⚠️  Details batch failed (IDs {i}-{i+len(chunk)-1}): {det_exc}")
                 if logger:
                     logger.log_video_error(
                         playlist_url=playlist_url,
                         playlist_title=playlist_title or "",
                         error=det_exc,
-                        extra="details batch; IDs: " + ", ".join(vid_ids),
+                        extra="details batch; IDs: " + ", ".join(chunk),
                     )
 
         # ── Phase 4: build video objects ──────────────────────────────────────
@@ -264,19 +428,57 @@ def fetch_videos_for_playlist(
             vid_id  = item["contentDetails"].get("videoId")
             title   = snippet.get("title")
 
+            # Per-video keyword check (see docstring): the playlist itself
+            # may have qualified for a channel override, but that doesn't
+            # guarantee every video inside it is actually relevant.
+            if required_keyword and required_keyword not in (title or ""):
+                if DEBUG:
+                    print(
+                        f"   [DEBUG] ⛔ SKIPPED video '{title}' ({vid_id}) - playlist "
+                        f"'{playlist_title}' passed the channel override but this "
+                        f"video's own title is missing required keyword "
+                        f"'{required_keyword}'; not added to any category."
+                    )
+                continue
+
             try:
                 det    = details_map.get(vid_id, {})
                 thumbs = snippet.get("thumbnails", {})
+                upload_date = iso_date(snippet.get("publishedAt"))
+
+                hebraic_year = extract_hebraic_year(title) or extract_hebraic_year(playlist_title)
+                if not hebraic_year:
+                    hebraic_year = compute_hebraic_year_from_date(upload_date)
+                    if hebraic_year:
+                        detail = f"computed {hebraic_year} from upload_date {upload_date}"
+                    else:
+                        detail = f"fallback from upload_date {upload_date} also failed"
+                    msg = (
+                        f"[DEBUG][hebraic-year] Could not extract year from title "
+                        f"'{title}' or playlist '{playlist_title}' (video {vid_id}); {detail}."
+                    )
+                    if DEBUG:
+                        print(msg)
+                    if logger:
+                        logger.log_video_error(
+                            playlist_url=playlist_url,
+                            playlist_title=playlist_title or "",
+                            video_id=vid_id or "",
+                            video_title=title or "",
+                            extra=msg,
+                        )
+
                 video_obj = {
                     "id":          vid_id,
                     "title":       title,
                     "url":         f"https://www.youtube.com/watch?v={vid_id}",
                     "duration":    parse_duration(det.get("contentDetails", {}).get("duration", "")),
                     "view_count":  int(det["statistics"]["viewCount"]) if det.get("statistics", {}).get("viewCount") else None,
-                    "upload_date": iso_date(snippet.get("publishedAt")),
+                    "upload_date": upload_date,
                     "thumbnail":   (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
                     "category":    category or "אחר",
                     "playlist":    playlist_title,
+                    "hebraic_year": hebraic_year,
                 }
 
                 if logger:
@@ -319,6 +521,133 @@ def fetch_videos_for_playlist(
     return videos, mismatched
 
 
+def fetch_videos_by_ids(
+    video_entries,
+    existing_ids,
+    category=None,
+    source_label=None,
+    logger=None,
+):
+    """
+    Fetches video details directly by video ID via videos().list() - no
+    playlistItems() call, since there's no real playlist involved.
+
+    Used for entries flagged kind="video" in categorize_playlists, i.e.
+    videos discovered on a channel's '/streams' or '/videos' tab (yt-dlp
+    lists these as raw videos, not named playlists, so they can't be fed
+    to fetch_videos_for_playlist which expects a `list=` playlist ID).
+
+    `video_entries` is a list of playlist_data dicts containing at least
+    "video_id" (as produced by categorize_playlists).
+
+    Returns (videos, mismatched) - same shape as fetch_videos_for_playlist.
+    """
+    videos = []
+    mismatched = []
+
+    new_ids = [
+        e["video_id"] for e in video_entries
+        if e.get("video_id") and e["video_id"] not in existing_ids
+    ]
+    if DEBUG:
+        print(f"   [DEBUG] fetch_videos_by_ids: {len(video_entries)} entries, "
+              f"{len(new_ids)} not yet in existing_ids.")
+    if not new_ids:
+        return videos, mismatched
+
+    try:
+        youtube = build("youtube", "v3", developerKey=API_KEY)
+
+        details_map = {}
+        DETAILS_BATCH_SIZE = 50
+        for i in range(0, len(new_ids), DETAILS_BATCH_SIZE):
+            chunk = new_ids[i:i + DETAILS_BATCH_SIZE]
+            try:
+                resp = youtube.videos().list(
+                    part="snippet,contentDetails,statistics",
+                    id=",".join(chunk),
+                ).execute()
+                for item in resp.get("items", []):
+                    details_map[item["id"]] = item
+            except Exception as exc:
+                print(f"   ⚠️  videos.list batch failed (IDs {i}-{i+len(chunk)-1}): {exc}")
+                if logger:
+                    logger.log_video_error(
+                        playlist_url=source_label or "",
+                        playlist_title=source_label or "",
+                        error=exc,
+                        extra="fetch_videos_by_ids batch; IDs: " + ", ".join(chunk),
+                    )
+
+        for vid_id in new_ids:
+            item = details_map.get(vid_id)
+            if not item:
+                continue  # video deleted/private/unavailable - just skip it
+
+            snippet = item.get("snippet", {})
+            title = snippet.get("title")
+
+            try:
+                thumbs = snippet.get("thumbnails", {})
+                upload_date = iso_date(snippet.get("publishedAt"))
+
+                hebraic_year = extract_hebraic_year(title)
+                if not hebraic_year:
+                    hebraic_year = compute_hebraic_year_from_date(upload_date)
+
+                video_obj = {
+                    "id":           vid_id,
+                    "title":        title,
+                    "url":          f"https://www.youtube.com/watch?v={vid_id}",
+                    "duration":     parse_duration(item.get("contentDetails", {}).get("duration", "")),
+                    "view_count":   int(item["statistics"]["viewCount"]) if item.get("statistics", {}).get("viewCount") else None,
+                    "upload_date":  upload_date,
+                    "thumbnail":    (thumbs.get("medium") or thumbs.get("default") or {}).get("url"),
+                    "category":     category or "אחר",
+                    "playlist":     source_label,
+                    "hebraic_year": hebraic_year,
+                }
+
+                if logger:
+                    logger.record_found(playlist_url=source_label or "", playlist_title=source_label or "")
+
+                target_cats = set()
+                if category:
+                    target_cats = check_video_category_mismatch(
+                        title, category, source_label, source_label, logger=logger
+                    )
+
+                if target_cats:
+                    mismatched.append((video_obj, target_cats))
+                else:
+                    videos.append(video_obj)
+
+                if logger:
+                    logger.record_success(playlist_url=source_label or "", playlist_title=source_label or "")
+
+            except Exception as exc:
+                print(f"   ❌ Error processing '{title}' ({vid_id}): {exc}")
+                if logger:
+                    logger.log_video_error(
+                        playlist_url=source_label or "",
+                        playlist_title=source_label or "",
+                        video_id=vid_id or "",
+                        video_title=title or "",
+                        error=exc,
+                    )
+
+    except Exception as exc:
+        print(f"❌ Failed to fetch videos by ID for '{source_label}': {exc}")
+        if logger:
+            logger.log_playlist_fetch_error(
+                playlist_url=source_label or "",
+                playlist_title=source_label or "",
+                error=exc,
+            )
+
+    return videos, mismatched
+
+
 def enrich_structured_playlists(
     structured_data,
     skip_fallback=True,
@@ -353,7 +682,10 @@ def enrich_structured_playlists(
 
         print(f"\n📂 {category}")
 
-        for playlist in playlists:
+        real_playlists = [p for p in playlists if p.get("kind") != "video"]
+        loose_videos   = [p for p in playlists if p.get("kind") == "video"]
+
+        for playlist in real_playlists:
             pl_url   = playlist.get("url")
             pl_title = playlist.get("title")
             print(f"   → {pl_title}")
@@ -364,6 +696,7 @@ def enrich_structured_playlists(
                 category=category,
                 playlist_title=pl_title,
                 logger=logger,
+                required_keyword=playlist.get("required_keyword"),
             )
 
             added = 0
@@ -388,6 +721,45 @@ def enrich_structured_playlists(
             if logger:
                 logger.record_added(playlist_url=pl_url, playlist_title=pl_title or "", count=added)
                 logger.log_playlist_summary(playlist_url=pl_url, playlist_title=pl_title or "")
+
+            print(f"      +{added} new videos added to '{category}'")
+
+        # Videos discovered on a '/streams' or '/videos' channel tab - these
+        # aren't playlists, so fetch them directly by video ID in one batch.
+        if loose_videos:
+            label = f"{category} (direct videos)"
+            print(f"   → {label} ({len(loose_videos)} candidate video(s))")
+
+            new_vids, mismatched = fetch_videos_by_ids(
+                loose_videos,
+                existing_ids,
+                category=category,
+                source_label=label,
+                logger=logger,
+            )
+
+            added = 0
+            for v in new_vids:
+                vid_id = v.get("id")
+                if vid_id and vid_id not in seen_ids[category]:
+                    seen_ids[category].add(vid_id)
+                    result[category].append(v)
+                    added += 1
+
+            for v, target_cats in mismatched:
+                target = next((c for c in structured_data if c in target_cats), None)
+                if target:
+                    pending_reroutes.append((v, target, category, label, label))
+                else:
+                    vid_id = v.get("id")
+                    if vid_id and vid_id not in seen_ids[category]:
+                        seen_ids[category].add(vid_id)
+                        result[category].append(v)
+                        added += 1
+
+            if logger:
+                logger.record_added(playlist_url=label, playlist_title=label, count=added)
+                logger.log_playlist_summary(playlist_url=label, playlist_title=label)
 
             print(f"      +{added} new videos added to '{category}'")
 

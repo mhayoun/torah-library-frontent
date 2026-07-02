@@ -70,25 +70,26 @@ export function useVideos() {
     )
   }, [catalog])
 
-  // All unique years parsed from video titles + upload dates
+  // Gematria value of each Hebrew letter — used only to sort hebraic_year
+  // values chronologically (newest first). Final-letter forms map to the
+  // same value as their regular counterpart.
+  const GEMATRIA = {
+    'א': 1, 'ב': 2, 'ג': 3, 'ד': 4, 'ה': 5, 'ו': 6, 'ז': 7, 'ח': 8, 'ט': 9,
+    'י': 10, 'כ': 20, 'ל': 30, 'מ': 40, 'נ': 50, 'ס': 60, 'ע': 70, 'פ': 80, 'צ': 90,
+    'ק': 100, 'ר': 200, 'ש': 300, 'ת': 400,
+    'ך': 20, 'ם': 40, 'ן': 50, 'ף': 80, 'ץ': 90,
+  }
+  const hebraicYearValue = (y) =>
+    Array.from(y).reduce((sum, ch) => sum + (GEMATRIA[ch] || 0), 0)
+
+  // All distinct hebraic_year values present across the videos, as supplied
+  // directly by the backend (extract_hebraic_year) — newest year first.
   const years = useMemo(() => {
-    const hebrewYearRe = /תש[פצ](?:"[א-ת]|[׳']?[א-ת]?)/g
     const yearSet = new Set()
-
     allVideos.forEach(v => {
-      const gm = v.title?.match(/\b(20\d{2})\b/)
-      if (gm) yearSet.add(gm[1])
-
-      const hm = v.title?.match(hebrewYearRe)
-      if (hm) hm.forEach(y => yearSet.add(y))
-
-      if (v.upload_date) {
-        const uy = new Date(v.upload_date).getFullYear()
-        if (!isNaN(uy)) yearSet.add(String(uy))
-      }
+      if (v.hebraic_year) yearSet.add(v.hebraic_year)
     })
-
-    return Array.from(yearSet).sort().reverse()
+    return Array.from(yearSet).sort((a, b) => hebraicYearValue(b) - hebraicYearValue(a))
   }, [allVideos])
 
   const categories = catalog ? Object.keys(catalog) : []

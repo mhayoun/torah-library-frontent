@@ -40,7 +40,12 @@ export default function VideoCard({ video }) {
 
         {/* Meta */}
         <div style={styles.body}>
-          <div style={styles.category}>{video.category}</div>
+          <div style={styles.topRow}>
+            <div style={styles.category}>{video.category}</div>
+            {video.hebraic_year && (
+              <span style={styles.yearBadge}>{video.hebraic_year}</span>
+            )}
+          </div>
           <h3 style={styles.title}>{video.title}</h3>
           <div style={styles.playlist}>{video.playlist}</div>
 
@@ -85,6 +90,12 @@ export default function VideoCard({ video }) {
             )}
 
             <div style={styles.modalMeta}>
+              {video.hebraic_year && (
+                <div style={styles.modalMetaItem}>
+                  <BookOpen size={14} />
+                  <span>{video.hebraic_year}</span>
+                </div>
+              )}
               {video.playlist && (
                 <div style={styles.modalMetaItem}>
                   <BookOpen size={14} />
@@ -192,12 +203,28 @@ const styles = {
     flexDirection: 'column',
     gap: 6,
   },
+  topRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
   category: {
     fontSize: '.68rem',
     fontWeight: 600,
     color: '#B8860B',
     letterSpacing: '.05em',
     textTransform: 'uppercase',
+  },
+  yearBadge: {
+    fontSize: '.7rem',
+    fontWeight: 600,
+    color: '#1A3A5C',
+    background: 'rgba(26,58,92,.1)',
+    padding: '2px 8px',
+    borderRadius: 20,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
   },
   title: {
     fontFamily: "'Frank Ruhl Libre', serif",

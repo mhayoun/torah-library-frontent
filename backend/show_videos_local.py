@@ -129,12 +129,13 @@ def main():
                     "duration":    v.get("duration"),
                     "view_count":  v.get("view_count"),
                     "category":    v.get("_category"),
+                    "hebraic_year": v.get("hebraic_year"),
                 }
                 for v in vids
             ]
             for pl, vids in playlists.items()
         }
-        #print(json.dumps(output, ensure_ascii=False, indent=2))
+        print(json.dumps(output, ensure_ascii=False, indent=2))
         return
 
     # ── Pretty-print output ───────────────────────────────────────────────────
@@ -157,10 +158,12 @@ def main():
             title     = v.get("title") or "(no title)"
             duration  = v.get("duration") or ""
             views     = v.get("view_count")
+            heb_year  = v.get("hebraic_year")
             views_str = f"  👁 {views:,}" if views else ""
             dur_str   = f"  ⏱ {duration}" if duration else ""
+            year_str  = f"  📅 {heb_year}" if heb_year else "  📅 —"
 
-            print(f"  {i:>4}.  [{date}]  {title}")
+            print(f"  {i:>4}.  [{date}]{year_str}  {title}")
             if dur_str or views_str:
                 print(f"         {dur_str}{views_str}")
 
