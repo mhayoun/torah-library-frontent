@@ -1,7 +1,27 @@
 # playlist_utils.py
+import re
 import yt_dlp
 
 DEBUG = True
+
+# Playlist IDs to permanently ignore when discovering playlists.
+#
+# These are old/closed playlists that never receive new uploads, so there's
+# no point spending YouTube API quota (or yt-dlp time) checking them on
+# every sync. Any entry whose `list=` ID matches one of these is dropped
+# in get_raw_playlists(), before it's even categorized.
+SKIPPED_PLAYLIST_IDS = {
+    "PLDOEgolnX2-zftmHofud7pjevIeXJrck2",
+    "PLDOEgolnX2-z6nuBPrOrOnsePpitIC_MX",
+    "PLDOEgolnX2-wGNuSAg90ZSTeQLU8n1NWy",
+    "PLDOEgolnX2-yIQMrF6ItTWaE8x5wr81LB",
+}
+
+
+def _extract_list_id(url):
+    """Pulls the `list=` playlist ID out of a YouTube URL, or None."""
+    match = re.search(r"[?&]list=([^&]+)", url or "")
+    return match.group(1) if match else None
 
 # Category rules mapping: { "Category Name": [list of keywords to match] }
 # NOTE: order matters - categorize_playlists checks categories in this order
@@ -38,13 +58,19 @@ CHANNEL_CATEGORY_OVERRIDES = {
 }
 
 
-def get_raw_playlists(urls):
+def get_raw_playlists(urls, skip_ids=SKIPPED_PLAYLIST_IDS):
     """Fetches all playlists (and, for channel tabs like /streams or /videos,
     individual videos) from the provided YouTube channel URLs.
 
     Each returned entry is tagged with '_source_url' = the TARGET_URL it
     came from, so downstream code (category overrides, video-vs-playlist
     detection) knows its origin.
+
+    skip_ids: set of playlist IDs to silently drop (default:
+    SKIPPED_PLAYLIST_IDS, the old/closed playlists we never re-check).
+    Pass skip_ids=set() to force a full scan - e.g. when Redis is empty
+    and we need to (re)build the catalogue from scratch, including those
+    normally-skipped playlists.
     """
     ydl_opts = {
         'extract_flat': 'in_playlist',
@@ -61,6 +87,17 @@ def get_raw_playlists(urls):
                     for entry in result['entries']:
                         if not entry:
                             continue  # yt-dlp can yield None for unavailable/private items
+
+                        list_id = _extract_list_id(entry.get('url', ''))
+                        if list_id in skip_ids:
+                            if DEBUG:
+                                print(
+                                    f"[DEBUG][get_raw_playlists] ⛔ SKIPPED old playlist "
+                                    f"'{entry.get('title')}' ({list_id}) - in skip_ids, "
+                                    f"not checked for new videos."
+                                )
+                            continue
+
                         entry['_source_url'] = url
                         raw_entries.append(entry)
             except Exception as e:

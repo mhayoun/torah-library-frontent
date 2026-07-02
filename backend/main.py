@@ -34,18 +34,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis as aioredis
 import ssl
 
-from playlist_utils import get_raw_playlists, categorize_playlists
+from playlist_utils import get_raw_playlists, categorize_playlists, SKIPPED_PLAYLIST_IDS
 from playlist_videos_utils import enrich_structured_playlists
 from debug_logger import DebugLogger
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
+# TARGET_URLS: checked on EVERY sync (incremental — only new videos).
 TARGET_URLS = [
     "https://www.youtube.com/@Rabbi_Aharon_Butbul/playlists",
     "https://www.youtube.com/@%D7%94%D7%A8%D7%91%D7%90%D7%94%D7%A8%D7%95%D7%9F%D7%91%D7%95%D7%98%D7%91%D7%95%D7%9C-%D7%A97%D7%9E/playlists",
+]
+
+# FULL_SCAN_ONLY_URLS: the @nissimtrabelsy3957 channel tabs. This channel is
+# a closed/old source that's skipped on normal incremental syncs to save API
+# quota and sync time — but if Redis is empty (cold start / cache wiped),
+# we still need to be able to rebuild the FULL catalogue from scratch, so
+# these are added back in for that case only. See _build_response().
+FULL_SCAN_ONLY_URLS = [
     "https://www.youtube.com/@nissimtrabelsy3957/streams",
     "https://www.youtube.com/@nissimtrabelsy3957/videos",
-    "https://www.youtube.com/@nissimtrabelsy3957/playlists"
+    "https://www.youtube.com/@nissimtrabelsy3957/playlists",
 ]
 
 CACHE_TTL = 6 * 3600  # 6 hours — same as Redis TTL
@@ -88,10 +97,19 @@ async def _build_response(r) -> dict:
 
     logger = DebugLogger()
 
+    # 1b. Redis empty (cold start / cache wiped)? Fall back to a FULL scan:
+    #     re-add the normally-skipped nissimtrabelsy3957 channel tabs and
+    #     stop excluding the old/closed playlists, so we can rebuild the
+    #     whole catalogue from scratch instead of missing content forever.
+    is_full_scan = len(existing) == 0
+    urls_to_scan = TARGET_URLS + FULL_SCAN_ONLY_URLS if is_full_scan else TARGET_URLS
+    skip_ids = set() if is_full_scan else SKIPPED_PLAYLIST_IDS
+
     # 2. Discover playlists from the channel pages
-    for url in TARGET_URLS:
-        print(f"[DEBUG] Processing TARGET_URL: {url}")
-    raw_playlists = get_raw_playlists(TARGET_URLS)
+    for url in urls_to_scan:
+        print(f"[DEBUG] Processing TARGET_URL: {url}"
+              + (" (full scan — nothing skipped)" if is_full_scan else ""))
+    raw_playlists = get_raw_playlists(urls_to_scan, skip_ids=skip_ids)
     structured = categorize_playlists(raw_playlists)
 
     # 3. Fetch videos — playlist_videos_utils already does incremental logic
@@ -302,10 +320,15 @@ async def debug_sync():
             sep()
             log("STEP 1 — Playlist discovery (yt-dlp)")
             sep()
+            is_full_scan = len(existing) == 0
+            urls_to_scan = TARGET_URLS + FULL_SCAN_ONLY_URLS if is_full_scan else TARGET_URLS
+            skip_ids = set() if is_full_scan else SKIPPED_PLAYLIST_IDS
+            if is_full_scan:
+                log("  cours_full is empty -> FULL SCAN (nissimtrabelsy3957 tabs + all playlists included)")
             try:
-                for url in TARGET_URLS:
+                for url in urls_to_scan:
                     log(f"  Processing TARGET_URL: {url}")
-                raw_playlists = get_raw_playlists(TARGET_URLS)
+                raw_playlists = get_raw_playlists(urls_to_scan, skip_ids=skip_ids)
                 structured    = categorize_playlists(raw_playlists)
             except Exception as e:
                 log(f"  FAILED: {e}")

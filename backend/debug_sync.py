@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -54,6 +55,13 @@ def warn(msg): print(f"  ⚠️   {msg}")
 def err(msg):  print(f"  ❌  {msg}")
 def info(msg): print(f"  ℹ️   {msg}")
 def hdr(msg):  sep("═"); print(f"  {msg}"); sep("═")
+
+def fmt_elapsed(seconds: float) -> str:
+    """Format a duration in seconds as e.g. '1m 23.4s' or '0.7s'."""
+    if seconds >= 60:
+        m, s = divmod(seconds, 60)
+        return f"{int(m)}m {s:04.1f}s"
+    return f"{seconds:.2f}s"
 
 
 # ── Redis connection ──────────────────────────────────────────────────────────
@@ -143,11 +151,14 @@ async def check_existing_ids(r):
 def check_playlist_discovery():
     hdr("STEP 2 — Playlist discovery (yt-dlp)")
 
+    t0 = time.perf_counter()
     try:
         raw = get_raw_playlists(TARGET_URLS)
     except Exception as e:
         err(f"get_raw_playlists() raised: {e}")
         return None, None
+    finally:
+        info(f"⏱  get_raw_playlists() took {fmt_elapsed(time.perf_counter() - t0)}")
 
     if not raw:
         err("get_raw_playlists() returned EMPTY list — yt-dlp found no playlists")
@@ -184,6 +195,7 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
     hdr("STEP 3 — Per-playlist YouTube API fetch (incremental logic probe)")
 
     total_new = 0
+    step3_t0 = time.perf_counter()
 
     for category, playlists in structured.items():
         if category == "אחר":
@@ -206,6 +218,7 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
                 err("Could not extract a playlist ID from the URL — yt-dlp may have returned a bad URL")
                 continue
 
+            pl_t0 = time.perf_counter()
             try:
                 new_vids, mismatched = fetch_videos_for_playlist(
                     pl_url,
@@ -217,6 +230,8 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
             except Exception as e:
                 err(f"fetch_videos_for_playlist() raised: {e}")
                 continue
+            finally:
+                info(f"⏱  fetch took {fmt_elapsed(time.perf_counter() - pl_t0)}")
 
             # ── Diagnosis ────────────────────────────────────────────────────
 
@@ -250,6 +265,8 @@ def check_per_playlist_fetch(structured, existing_ids, verbose=False):
         warn("OR the early-stop is firing incorrectly (see per-playlist output above).")
     else:
         ok(f"TOTAL new videos found across all playlists = {total_new}")
+
+    info(f"⏱  STEP 3 total elapsed: {fmt_elapsed(time.perf_counter() - step3_t0)}")
 
     return total_new
 
@@ -397,6 +414,8 @@ async def main():
     ok("Connected to Redis")
     print()
 
+    run_t0 = time.perf_counter()
+
     try:
         # ── Optional: clear the cache to simulate the real trigger ────────────
         if args.clear_cache:
@@ -407,6 +426,7 @@ async def main():
         # ── Inspect-only mode ─────────────────────────────────────────────────
         await inspect_redis(r, verbose=args.verbose)
         if args.inspect_redis:
+            info(f"⏱  Elapsed: {fmt_elapsed(time.perf_counter() - run_t0)}")
             return
 
         # ── Full diagnostic run ───────────────────────────────────────────────
@@ -424,6 +444,10 @@ async def main():
         await check_redis_write(r, all_videos, new_count, dry_run=not args.write)
 
         print_summary(existing_ids, total_new_from_probe, all_videos, new_count)
+
+        hdr("⏱  TOTAL elapsed time")
+        ok(f"Full diagnostic run took {fmt_elapsed(time.perf_counter() - run_t0)}")
+        print()
 
     finally:
         await r.aclose()
